@@ -1,0 +1,22 @@
+---
+# ---- Manual handoff from the epicbook-infra pipeline (Terraform outputs, run #20260927.1) ----
+# Non-sensitive values only. The MySQL password is never stored in this repository.
+app_public_ip: "20.162.94.243"
+backend_private_ip: "10.40.2.4"
+mysql_fqdn: "mysql-epicbook-oluwagbade.mysql.database.azure.com"
+
+# ---- Application ----
+app_user: epicbook
+app_dir: /opt/epicbook
+app_repo: https://github.com/gbadedata/epicbook-app.git
+app_version: "{{ lookup('env', 'APP_VERSION') | default('main', true) }}"
+app_port: 8080
+submitted_by: "Oluwagbade Odimayo"
+
+# ---- Database (password comes from the secret pipeline variable via the environment) ----
+db_name: bookstore
+db_user: epicbookadmin
+db_password: "{{ lookup('env', 'EPICBOOK_DB_PASSWORD') }}"
+mysql_client_opts: >-
+  --host={{ mysql_fqdn }} --user={{ db_user }}
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=/etc/ssl/certs/ca-certificates.crt

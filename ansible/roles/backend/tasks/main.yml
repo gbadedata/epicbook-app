@@ -1,0 +1,148 @@
+---
+- name: Fail early if the database password was not supplied
+  ansible.builtin.assert:
+    that:
+      - db_password | length > 0
+    fail_msg: "EPICBOOK_DB_PASSWORD is empty: map the secret pipeline variable into the environment"
+  no_log: true
+
+- name: Install Node.js, npm, Git and the MySQL client
+  ansible.builtin.apt:
+    name:
+      - nodejs
+      - npm
+      - git
+      - mysql-client
+    state: present
+
+- name: Create the application system user
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ app_dir }}"
+    create_home: true
+
+- name: Check out EpicBook at the commit being deployed
+  ansible.builtin.git:
+    repo: "{{ app_repo }}"
+    dest: "{{ app_dir }}/app"
+    version: "{{ app_version }}"
+  become_user: "{{ app_user }}"
+  register: app_code
+  notify: Restart EpicBook
+
+- name: Check whether dependencies are installed
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/app/node_modules"
+  register: node_modules
+
+- name: Install production dependencies (only when the code changed or they are missing)
+  ansible.builtin.command: npm ci --omit=dev --no-audit --no-fund
+  args:
+    chdir: "{{ app_dir }}/app"
+  environment:
+    HOME: "{{ app_dir }}"
+  become_user: "{{ app_user }}"
+  when: app_code.changed or not node_modules.stat.exists
+  notify: Restart EpicBook
+
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: /etc/epicbook
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Write the runtime environment (database URL stays outside the code)
+  ansible.builtin.template:
+    src: epicbook.env.j2
+    dest: /etc/epicbook/epicbook.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  notify: Restart EpicBook
+
+- name: Check whether the EpicBook schema is loaded
+  ansible.builtin.command: >-
+    mysql {{ mysql_client_opts }} -N -B -e
+    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ db_name }}' AND table_name='Book'"
+  environment:
+    MYSQL_PWD: "{{ db_password }}"
+  register: schema_check
+  changed_when: false
+
+- name: Import the schema (first deployment only)
+  ansible.builtin.shell: >-
+    mysql {{ mysql_client_opts }} {{ db_name }}
+    < {{ app_dir }}/app/db/BuyTheBook_Schema.sql
+  environment:
+    MYSQL_PWD: "{{ db_password }}"
+  when: schema_check.stdout | trim == "0"
+  changed_when: true
+
+- name: Count the books in the catalogue
+  ansible.builtin.command: >-
+    mysql {{ mysql_client_opts }} -N -B -e "SELECT COUNT(*) FROM {{ db_name }}.Book"
+  environment:
+    MYSQL_PWD: "{{ db_password }}"
+  register: book_count
+  changed_when: false
+
+- name: Load the seed data, authors before books (only when the catalogue is empty)
+  ansible.builtin.shell: >-
+    mysql {{ mysql_client_opts }} {{ db_name }} < {{ app_dir }}/app/db/author_seed.sql &&
+    mysql {{ mysql_client_opts }} {{ db_name }} < {{ app_dir }}/app/db/books_seed.sql
+  environment:
+    MYSQL_PWD: "{{ db_password }}"
+  when: book_count.stdout | trim == "0"
+  changed_when: true
+
+- name: Install the systemd service
+  ansible.builtin.template:
+    src: epicbook.service.j2
+    dest: /etc/systemd/system/epicbook.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart EpicBook
+
+- name: Enable and start EpicBook
+  ansible.builtin.systemd_service:
+    name: epicbook
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply any pending restart now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for EpicBook to listen on its port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ app_port }}"
+    timeout: 60
+
+- name: Check EpicBook answers locally on the backend
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/"
+    status_code: 200
+
+- name: Report what is stored in MySQL
+  ansible.builtin.command: >-
+    mysql {{ mysql_client_opts }} -N -B -e
+    "SELECT CONCAT('books=', (SELECT COUNT(*) FROM {{ db_name }}.Book),
+    ' authors=', (SELECT COUNT(*) FROM {{ db_name }}.Author),
+    ' cart_rows=', (SELECT COUNT(*) FROM {{ db_name }}.Cart),
+    ' checkout_rows=', (SELECT COUNT(*) FROM {{ db_name }}.Checkout))"
+  environment:
+    MYSQL_PWD: "{{ db_password }}"
+  register: db_report
+  changed_when: false
+
+- name: Show the database report
+  ansible.builtin.debug:
+    msg: "MySQL {{ db_name }}: {{ db_report.stdout }}"

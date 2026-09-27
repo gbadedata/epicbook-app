@@ -181,3 +181,17 @@ If you are developer, you can consider developing below feature and send the pul
 
 
 
+
+---
+
+## Deployment on Azure (DMI Week 10, Assignment 4, Oluwagbade Odimayo)
+
+This is the **Application Repository**. The infrastructure lives in [`gbadedata/epicbook-infra`](https://github.com/gbadedata/epicbook-infra).
+
+- `ansible/` configures both VMs and deploys EpicBook:
+  - `common`: baseline packages on both servers
+  - `backend`: Node.js, the app checked out at the deployed commit, production dependencies, the database URL in a root-only environment file, the schema and seed data (loaded once), and a systemd service on port 8080
+  - `frontend`: Nginx as a reverse proxy to the backend's private IP
+- `ansible/inventory.ini` and `ansible/group_vars/all.yml` hold the **manual handoff** from the infrastructure pipeline: `app_public_ip`, `backend_ansible_host`, `backend_private_ip` and `mysql_fqdn`. Only non-sensitive values are stored.
+- `azure-pipelines.yml` runs on every push to `main`: the Deploy stage runs the playbook with the SSH key from Azure DevOps Secure Files and the MySQL password from a secret pipeline variable; the Verify stage checks the site through the frontend and confirms the backend port is closed to the internet.
+- Application changes for Azure Database for MySQL: the production config reads `DATABASE_URL` and verifies TLS (`models/index.js` now passes the config through, so the SSL options are applied).

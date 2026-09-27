@@ -1,0 +1,37 @@
+---
+- name: Baseline for both EpicBook servers
+  hosts: frontend:backend
+  become: true
+  roles:
+    - common
+
+- name: Backend - EpicBook application and database
+  hosts: backend
+  become: true
+  roles:
+    - backend
+
+- name: Frontend - Nginx reverse proxy to the backend private IP
+  hosts: frontend
+  become: true
+  roles:
+    - frontend
+
+- name: Verify EpicBook end to end from the pipeline agent
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Load the home page through the frontend public IP
+      ansible.builtin.uri:
+        url: "http://{{ app_public_ip }}/"
+        return_content: true
+        status_code: 200
+      register: home
+
+    - name: Check the page shows my name and database-backed books
+      ansible.builtin.assert:
+        that:
+          - submitted_by in home.content
+          - "'card-title' in home.content"
+        success_msg: "EpicBook is live at http://{{ app_public_ip }}/ with name and books from MySQL"

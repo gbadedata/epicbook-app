@@ -1,0 +1,71 @@
+# Application Pipeline: Ansible configures both VMs and deploys EpicBook, then the app is verified.
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+pool:
+  name: oluwagbade-selfhosted-pool
+
+variables:
+  - group: epicbook # mysql_admin_password (secret)
+
+stages:
+  - stage: Deploy
+    displayName: Configure and deploy
+    jobs:
+      - job: Ansible
+        displayName: Configure servers and deploy EpicBook with Ansible
+        steps:
+          - checkout: self
+            clean: true
+          - task: DownloadSecureFile@1
+            name: sshKey
+            displayName: Download the VM SSH private key (secure file)
+            inputs:
+              secureFile: epicbook-week10
+          - bash: |
+              set -euo pipefail
+              echo "Submitted by: Oluwagbade Odimayo"
+              echo "Deploying commit: $(Build.SourceVersion)"
+              chmod 600 "$(sshKey.secureFilePath)"
+              cd ansible
+              ansible --version | head -1
+              ansible-playbook site.yml --syntax-check
+              ansible-playbook site.yml --private-key "$(sshKey.secureFilePath)"
+            displayName: Run the Ansible playbook
+            env:
+              EPICBOOK_DB_PASSWORD: $(mysql_admin_password)
+              APP_VERSION: $(Build.SourceVersion)
+              ANSIBLE_SSH_ARGS: -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$(Agent.TempDirectory)/known_hosts
+              ANSIBLE_FORCE_COLOR: '1'
+
+  - stage: Verify
+    displayName: Verify
+    dependsOn: Deploy
+    jobs:
+      - job: Smoke
+        displayName: Check EpicBook from outside
+        steps:
+          - checkout: self
+            clean: true
+          - bash: |
+              set -euo pipefail
+              APP_IP=$(awk -F'"' '/^app_public_ip:/{print $2}' ansible/group_vars/all.yml)
+              BACKEND_HOST=$(awk '/^\[backend\]/{f=1;next} f && /ansible_host=/{sub(/.*ansible_host=/,"");print $1;exit}' ansible/inventory.ini)
+              echo "Frontend: http://${APP_IP}/"
+              code=$(curl -s -o home.html -w '%{http_code}' "http://${APP_IP}/")
+              echo "Home page HTTP status: ${code}"
+              test "${code}" = "200"
+              grep -q "Oluwagbade Odimayo" home.html && echo "OK: name and deployment date banner present"
+              echo "Books rendered from MySQL: $(grep -c 'card-title' home.html)"
+              test "$(grep -c 'card-title' home.html)" -gt 0
+              test "$(curl -s -o /dev/null -w '%{http_code}' "http://${APP_IP}/gallery")" = "200" && echo "OK: /gallery returns 200"
+              if curl -s -o /dev/null --max-time 5 "http://${BACKEND_HOST}:8080/"; then
+                echo "FAIL: the backend application port is reachable from the internet"; exit 1
+              else
+                echo "OK: backend port 8080 is not reachable from the internet"
+              fi
+            displayName: Smoke test through the frontend public IP
