@@ -13,8 +13,35 @@ variables:
   - group: epicbook # mysql_admin_password (secret)
 
 stages:
+  # Runs on every branch. Catches dependency and syntax problems on the agent,
+  # before anything is changed on the servers.
+  - stage: Validate
+    displayName: Validate
+    jobs:
+      - job: Validate
+        displayName: Install dependencies and check syntax
+        steps:
+          - checkout: self
+            clean: true
+          - task: UseNode@1
+            displayName: Use Node.js 22.x
+            inputs:
+              version: '22.x'
+          - script: npm ci --no-audit --no-fund
+            displayName: Install dependencies (npm ci)
+          - bash: |
+              set -euo pipefail
+              for f in server.js $(git ls-files 'models/*.js' 'routes/*.js'); do
+                node --check "$f"
+                echo "syntax OK: $f"
+              done
+            displayName: Check JavaScript syntax
+
+  # Deploys only from main, so a broken branch can never reach the servers.
   - stage: Deploy
     displayName: Configure and deploy
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - job: Ansible
         displayName: Configure servers and deploy EpicBook with Ansible
